@@ -25,6 +25,34 @@ const iconButton = (name, action, label, extra = '') => `<button class="icon-but
 const popup = document.body.classList.contains('popup');
 let data, group = 'all', search = '', tab = 'fields', review = null, result = null, busy = false, error = '';
 const app = $('#app'), dialog = $('#dialog');
+const scrollPositions = new Map();
+let renderedView = null, renderedBusy = false, dialogScroll = null;
+function scrollTargets() {
+  const targets = new Map([['document', document.scrollingElement]]);
+  for (const selector of ['.popup-content', '.group-chips', '.group-nav', '.sidebar']) {
+    const node = $(selector); if (node) targets.set(selector, node);
+  }
+  for (const row of app.querySelectorAll('.review-row')) {
+    targets.set(`answer:${$('input[data-match]', row).dataset.match}`, $('.review-value', row));
+  }
+  return targets;
+}
+function captureScroll() {
+  return new Map([...scrollTargets()].map(([key, node]) => [key, { left: node.scrollLeft, top: node.scrollTop }]));
+}
+function restoreScroll(positions) {
+  if (!positions) return;
+  for (const [key, node] of scrollTargets()) {
+    const position = positions.get(key);
+    if (position) node.scrollTo({ ...position, behavior: 'instant' });
+  }
+}
+dialog.addEventListener('close', () => {
+  // Closing a native dialog can restore focus and move the page. Restore after that,
+  // including when the action was cancelled with Escape or the close button.
+  restoreScroll(dialogScroll);
+  dialogScroll = null;
+});
 let toastTimer;
 function toast(message) {
   const node = $('#toast'); node.textContent = message; node.classList.add('visible');
@@ -73,6 +101,8 @@ function libraryFooter() {
 }
 function render() {
   if (!data) return;
+  if (renderedView && !renderedBusy) scrollPositions.set(renderedView, dialogScroll || captureScroll());
+  const nextView = popup ? tab : 'manager';
   if (group !== 'all' && group !== '' && !data.groups.some(g => g.id === group)) group = 'all';
   if (popup) {
     app.innerHTML = `${header()}<nav class="tabs" aria-label="Extension views"><button class="tab ${tab === 'fields' ? 'active' : ''}" data-action="tab" data-tab="fields">${icon('grid')}My fields</button><button class="tab ${tab === 'review' ? 'active' : ''}" data-action="tab" data-tab="review">${icon('scan')}Review & fill${review ? ` · ${review.matches.length}` : ''}</button></nav>
@@ -84,6 +114,10 @@ function render() {
       <div class="intro-card"><div class="intro-icon">${icon('spark')}</div><div><strong>Set it once. Let your ghost do the typing.</strong><p>Save your values, open a website, then click the Ghost Typer toolbar icon.</p></div><span class="intro-step">Scan → Review → Fill</span></div>
       ${toolbar()}<div id="sections">${sections()}</div>${libraryFooter()}</main></div>`;
   }
+  renderedView = nextView;
+  renderedBusy = busy;
+  // Temporary loading screens must not replace a view's remembered position with zero.
+  if (!busy) restoreScroll(scrollPositions.get(nextView));
 }
 function footerButton() {
   if (busy) return '<button class="primary" disabled>Working…</button>';
@@ -108,6 +142,7 @@ function renderReview() {
 }
 
 function showDialog(title, subtitle, body, submitText = 'Save', onSubmit, danger = false) {
+  dialogScroll = captureScroll();
   dialog.innerHTML = `<form><div class="dialog-head"><h2>${escape(title)}</h2>${iconButton('close', 'closeDialog', 'Close dialog')}</div><p class="dialog-subtitle">${escape(subtitle)}</p>${body}<div class="dialog-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-action="closeDialog">Cancel</button><button type="submit" class="${danger ? 'danger-button' : 'primary'}">${escape(submitText)}</button></div></form>`;
   // Non-submit buttons must never implicitly submit a dialog form.
   dialog.querySelectorAll('button[data-action]').forEach(b => b.type = 'button');
@@ -118,7 +153,7 @@ function showDialog(title, subtitle, body, submitText = 'Save', onSubmit, danger
     finally { button.disabled = false; }
   };
   dialog.showModal();
-  const focus = $('input:not([type="radio"]),textarea,select', dialog); if (focus) focus.focus();
+  const focus = $('input:not([type="radio"]),textarea,select', dialog); if (focus) focus.focus({ preventScroll: true });
 }
 async function mutate(action, message) {
   data = await send('mutate', { action }); review = null; result = null; render(); toast(message);
@@ -136,7 +171,7 @@ function editField(id, selectedGroup) {
       await mutate({ type: 'saveField', field: { ...field, label, value: form.get('value'), kind: form.get('kind'), groupId: form.get('groupId'), aliases: form.get('aliases').split(',').map(v => v.trim()).filter(Boolean), autocomplete: label === field.label ? field.autocomplete : '' } }, id ? 'Field updated' : 'Field added');
     });
   $('select[name="kind"]', dialog).onchange = event => { $('#valueContainer', dialog).innerHTML = `Value${valueInput(event.target.value, '')}`; };
-  if (id) $('[name="value"]', dialog).focus();
+  if (id) $('[name="value"]', dialog).focus({ preventScroll: true });
 }
 function valueInput(kind, value) {
   return kind === 'boolean' ? `<select name="value"><option value="">Not set</option><option value="true" ${value === 'true' ? 'selected' : ''}>Checked</option><option value="false" ${value === 'false' ? 'selected' : ''}>Unchecked</option></select>`
@@ -219,7 +254,11 @@ document.addEventListener('click', async event => {
   } catch (e) { toast(e.message); }
 });
 document.addEventListener('input', event => {
-  if (event.target.id === 'search') { search = event.target.value; $('#sections').innerHTML = sections(); }
+  if (event.target.id === 'search') {
+    const position = captureScroll();
+    search = event.target.value; $('#sections').innerHTML = sections();
+    restoreScroll(position);
+  }
 });
 document.addEventListener('change', event => {
   const id = event.target.dataset.match;
