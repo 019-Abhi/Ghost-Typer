@@ -16,7 +16,7 @@ This is an installable development extension, not a Chrome Web Store listing. No
 
 ## Use it
 
-1. Click Ghost Typer. Edit a suggested field or choose **Add field**. Values save when you click **Save changes** / **Add field**.
+1. Click Ghost Typer. Click a field’s value (or **Add a value to get started**) to edit it, or choose **Add field**. The editor opens with the value focused. Values save when you click **Save changes** / **Add field**.
 2. Use groups to organize your details. Starter groups: **Personal, Contact, Address, Education, Employment**. All suggested values start empty.
 3. Add aliases such as `University name, College, Institution` for the labels websites use.
 4. Visit a regular HTTP/HTTPS website. Click the Ghost Typer toolbar icon, then **Scan this page**.

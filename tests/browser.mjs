@@ -52,7 +52,7 @@ try {
   await manager.getByLabel('Field name', { exact: true }).fill('About me');
   await manager.getByRole('textbox', { name: 'Value', exact: false }).fill('I build useful things.');
   await manager.getByRole('button', { name: 'Add field', exact: true }).last().click();
-  await manager.getByRole('button', { name: 'Edit About me', exact: true }).click();
+  await manager.getByText('I build useful things.', { exact: true }).click();
   await manager.getByRole('textbox', { name: 'Value', exact: false }).fill('I build thoughtful software.');
   await manager.getByRole('button', { name: 'Save changes', exact: true }).click();
   pass('Groups and field values can be created, renamed, and edited through the UI');

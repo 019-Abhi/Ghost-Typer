@@ -52,8 +52,8 @@ function toolbar() {
     ${popup ? `<button class="primary" data-action="addField">${icon('plus')}Add field</button>` : `<span class="field-total">${filledCount()} of ${data.fields.length} fields ready</span>`}</div>`;
 }
 function fieldCard(f) {
-  return `<article class="field-card"><div class="field-top"><span class="field-label">${escape(f.label)}</span><div class="field-actions">${iconButton('edit', 'editField', `Edit ${f.label}`, `data-id="${escape(f.id)}"`)}${iconButton('trash', 'deleteField', `Delete ${f.label}`, `data-id="${escape(f.id)}"`)}</div></div>
-    <div class="field-value ${f.value === '' ? 'empty' : ''}" title="${escape(f.value)}">${f.value === '' ? 'Add a value to get started' : escape(f.kind === 'boolean' ? (f.value === 'true' ? 'Checked' : 'Unchecked') : f.value)}</div>
+  return `<article class="field-card"><div class="field-top"><span class="field-label">${escape(f.label)}</span><div class="field-actions">${iconButton('trash', 'deleteField', `Delete ${f.label}`, `data-id="${escape(f.id)}"`)}</div></div>
+    <button type="button" class="field-value ${f.value === '' ? 'empty' : ''}" data-action="editField" data-id="${escape(f.id)}" aria-label="${escape(`Edit ${f.label}`)}" title="${escape(f.value ? `${f.value} — Click to edit` : 'Click to add a value')}">${f.value === '' ? 'Add a value to get started' : escape(f.kind === 'boolean' ? (f.value === 'true' ? 'Checked' : 'Unchecked') : f.value)}</button>
     <div class="field-bottom">${icon('link')}<span>${f.aliases.length ? `Also matches ${escape(f.aliases.slice(0, 2).join(', '))}` : 'Matches by field name'}</span></div></article>`;
 }
 function sections() {
@@ -136,6 +136,7 @@ function editField(id, selectedGroup) {
       await mutate({ type: 'saveField', field: { ...field, label, value: form.get('value'), kind: form.get('kind'), groupId: form.get('groupId'), aliases: form.get('aliases').split(',').map(v => v.trim()).filter(Boolean), autocomplete: label === field.label ? field.autocomplete : '' } }, id ? 'Field updated' : 'Field added');
     });
   $('select[name="kind"]', dialog).onchange = event => { $('#valueContainer', dialog).innerHTML = `Value${valueInput(event.target.value, '')}`; };
+  if (id) $('[name="value"]', dialog).focus();
 }
 function valueInput(kind, value) {
   return kind === 'boolean' ? `<select name="value"><option value="">Not set</option><option value="true" ${value === 'true' ? 'selected' : ''}>Checked</option><option value="false" ${value === 'false' ? 'selected' : ''}>Unchecked</option></select>`
