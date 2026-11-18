@@ -1,4 +1,5 @@
-import { COLORS, validateLibrary } from './model.js';
+import { COLORS, migrateLibrary, MAX_BACKUP_BYTES, serializeBackup } from './model.js';
+import { sensitiveField } from './safety.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -24,9 +25,23 @@ const icon = name => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">$
 const iconButton = (name, action, label, extra = '') => `<button class="icon-button ${name === 'trash' ? 'remove' : ''}" data-action="${action}" aria-label="${escape(label)}" title="${escape(label)}" ${extra}>${icon(name)}</button>`;
 const popup = document.body.classList.contains('popup');
 let data, group = 'all', search = '', tab = 'review', review = null, result = null, busy = false, error = '';
+let allowInsecure = false, skipLimit = 30, pendingDraft = null, activeDraft = null, draftQueue = Promise.resolve();
+const editorId = popup ? 'popup' : sessionStorage.getItem('editorId') || crypto.randomUUID();
+if (!popup) sessionStorage.setItem('editorId', editorId);
+const draftKey = `draft:${editorId}`;
 const app = $('#app'), dialog = $('#dialog');
 const scrollPositions = new Map();
-let renderedView = null, renderedBusy = false, dialogScroll = null;
+let renderedView = null, renderedBusy = false, dialogScroll = null, dialogFocus = null;
+function focusSnapshot() {
+  const node = document.activeElement;
+  return app.contains(node) ? { id: node.id, dataset: { ...node.dataset }, start: node.selectionStart, end: node.selectionEnd } : null;
+}
+function restoreFocus(saved) {
+  if (!saved) return;
+  const node = saved.id ? document.getElementById(saved.id) : [...app.querySelectorAll('button,input')].find(el => Object.keys(saved.dataset).length && Object.entries(saved.dataset).every(([key, value]) => el.dataset[key] === value));
+  node?.focus({ preventScroll: true });
+  if (node && typeof saved.start === 'number' && ['search', 'text'].includes(node.type)) node.setSelectionRange(saved.start, saved.end);
+}
 function scrollTargets() {
   const targets = new Map([['document', document.scrollingElement]]);
   for (const selector of ['.popup-content', '.group-chips', '.group-nav', '.sidebar']) {
@@ -51,8 +66,24 @@ dialog.addEventListener('close', () => {
   // Closing a native dialog can restore focus and move the page. Restore after that,
   // including when the action was cancelled with Escape or the close button.
   restoreScroll(dialogScroll);
+  restoreFocus(dialogFocus);
   dialogScroll = null;
+  dialogFocus = null;
+  activeDraft = null;
 });
+function persistDraft() {
+  if (!activeDraft || !dialog.open) return;
+  pendingDraft = { ...activeDraft, values: Object.fromEntries(new FormData($('form', dialog))), at: Date.now() };
+  const snapshot = structuredClone(pendingDraft);
+  draftQueue = draftQueue.then(() => chrome.storage.session.set({ [draftKey]: snapshot })).catch(() => toast('Could not keep a draft. Save your edit before closing.'));
+}
+async function clearDraft() {
+  activeDraft = null; pendingDraft = null;
+  await draftQueue; await chrome.storage.session.remove(draftKey);
+}
+function draftBanner() {
+  return pendingDraft ? '<div class="draft-banner" role="status">You have an unsaved edit.<button data-action="resumeDraft">Resume</button><button data-action="discardDraft">Discard</button></div>' : '';
+}
 let toastTimer;
 function toast(message) {
   const node = $('#toast'); node.textContent = message; node.classList.add('visible');
@@ -60,11 +91,11 @@ function toast(message) {
 }
 async function send(type, payload = {}) {
   const response = await chrome.runtime.sendMessage({ type, ...payload });
-  if (!response?.ok) throw new Error(response?.error || 'Could not connect to Ghost Typer. Reload the extension and try again.');
+  if (!response?.ok) { const error = new Error(response?.error || 'Could not connect to Ghost Typer. Reload the extension and try again.'); error.code = response?.code; throw error; }
   return response.data;
 }
 const groupFor = id => data.groups.find(g => g.id === id) || { id: '', name: 'Ungrouped', color: 'slate' };
-const filledCount = () => data.fields.filter(f => f.value !== '').length;
+const filledCount = () => data.fields.filter(f => f.value !== '' && !sensitiveField(f)).length;
 function groupButtons(chips = false) {
   const items = [{ id: 'all', name: 'All fields', color: 'violet' }, ...data.groups, { id: '', name: 'Ungrouped', color: 'slate' }];
   return items.map(g => `<button class="${chips ? '' : 'group-button'} ${group === g.id ? 'active' : ''}" data-action="group" data-id="${escape(g.id)}" aria-pressed="${group === g.id}">
@@ -97,33 +128,35 @@ function sections() {
   }).join('');
 }
 function libraryFooter() {
-  return `<footer class="library-footer"><span>Your details stay in this Chrome profile.</span><div class="footer-actions"><button data-action="export">Export backup</button><button data-action="import">Import</button></div></footer>`;
+  return `<footer class="library-footer"><span>Your details stay in this Chrome profile.</span><div class="footer-actions"><button data-action="export">Export backup</button><button data-action="import">Import</button><button data-action="privacy">Data & privacy</button></div></footer>`;
 }
 function render() {
   if (!data) return;
+  const focus = focusSnapshot();
   if (renderedView && !renderedBusy) scrollPositions.set(renderedView, dialogScroll || captureScroll());
   const nextView = popup ? tab : 'manager';
   if (group !== 'all' && group !== '' && !data.groups.some(g => g.id === group)) group = 'all';
   if (popup) {
-    app.innerHTML = `${header()}<nav class="tabs" aria-label="Extension views"><button class="tab ${tab === 'review' ? 'active' : ''}" data-action="tab" data-tab="review">${icon('scan')}Review & fill${review ? ` · ${review.matches.length}` : ''}</button><button class="tab ${tab === 'fields' ? 'active' : ''}" data-action="tab" data-tab="fields">${icon('grid')}My fields</button></nav>
-      <main class="popup-content">${error ? `<div class="error-banner" role="alert">${escape(error)}</div>` : ''}${tab === 'fields' ? toolbar() + `<nav class="group-chips" aria-label="Field groups">${groupButtons(true)}<button data-action="addGroup">${icon('plus')}New group</button></nav><div id="sections">${sections()}</div>` : renderReview()}</main>
-      <footer class="popup-footer">${footerButton()}<p class="footnote">${review && tab === 'review' ? 'Only your selected values will be filled. Nothing is submitted.' : 'You review every match before anything is filled.'}</p></footer>`;
+    app.innerHTML = `${header()}<nav class="tabs" role="tablist" aria-label="Extension views"><button class="tab ${tab === 'review' ? 'active' : ''}" role="tab" id="tab-review" aria-selected="${tab === 'review'}" aria-controls="view-panel" tabindex="${tab === 'review' ? 0 : -1}" data-action="tab" data-tab="review">${icon('scan')}Review & fill${review ? ` · ${review.matches.length}` : ''}</button><button class="tab ${tab === 'fields' ? 'active' : ''}" role="tab" id="tab-fields" aria-selected="${tab === 'fields'}" aria-controls="view-panel" tabindex="${tab === 'fields' ? 0 : -1}" data-action="tab" data-tab="fields">${icon('grid')}My fields</button></nav>
+      <main class="popup-content" id="view-panel" role="tabpanel" aria-labelledby="tab-${tab}">${draftBanner()}${error ? `<div class="error-banner" role="alert">${escape(error)}</div>` : ''}${tab === 'fields' ? toolbar() + `<nav class="group-chips" aria-label="Field groups">${groupButtons(true)}<button data-action="addGroup">${icon('plus')}New group</button></nav><div id="sections">${sections()}</div>` : renderReview()}</main>
+      <footer class="popup-footer">${footerButton()}<p class="footnote">${review && tab === 'review' ? 'Only selected values are filled. Website scripts can react to changes.' : 'You review every match before anything is filled.'}</p></footer>`;
   } else {
-    app.innerHTML = `${header()}<div class="workspace"><aside class="sidebar"><div class="sidebar-label">YOUR LIBRARY ${iconButton('plus', 'addGroup', 'Create group')}</div><nav class="group-nav" aria-label="Field groups">${groupButtons()}</nav><button class="text-button" style="margin:14px 12px" data-action="addGroup">${icon('plus')}Create a group</button><div class="sidebar-note">${icon('shield')}<p><strong>Yours. And only yours.</strong><br>No accounts. No cloud.<br>Just your details, saved locally.</p></div></aside>
+    app.innerHTML = `${header()}<div class="workspace"><aside class="sidebar"><div class="sidebar-label">YOUR LIBRARY ${iconButton('plus', 'addGroup', 'Create group')}</div><nav class="group-nav" aria-label="Field groups">${groupButtons()}</nav><button class="text-button" style="margin:14px 12px" data-action="addGroup">${icon('plus')}Create a group</button><div class="sidebar-note">${icon('shield')}<p><strong>Yours. And only yours.</strong><br>No accounts. No cloud.<br>Use ordinary form details, never passwords or financial secrets.</p></div></aside>
       <main class="library-main"><div class="page-title"><div><div class="eyebrow">LESS REPETITION, MORE POSSIBILITY</div><h1>${group === 'all' ? 'Your details, remembered.' : escape(groupFor(group).name)}</h1><p class="subtitle">A home for the things you type over and over.</p></div><button class="primary" data-action="addField">${icon('plus')}Add field</button></div>
       <div class="intro-card"><div class="intro-icon">${icon('spark')}</div><div><strong>Set it once. Let your ghost do the typing.</strong><p>Save your values, open a website, then click the Ghost Typer toolbar icon.</p></div><span class="intro-step">Scan → Review → Fill</span></div>
-      ${toolbar()}<div id="sections">${sections()}</div>${libraryFooter()}</main></div>`;
+      ${draftBanner()}${toolbar()}<div id="sections">${sections()}</div>${libraryFooter()}</main></div>`;
   }
   renderedView = nextView;
   renderedBusy = busy;
   // Temporary loading screens must not replace a view's remembered position with zero.
   if (!busy) restoreScroll(scrollPositions.get(nextView));
+  if (!dialog.open) restoreFocus(focus);
 }
 function footerButton() {
   if (busy) return '<button class="primary" disabled>Working…</button>';
   if (tab === 'review' && review) {
     const count = review.matches.filter(m => m.selected && !m.same).length;
-    if (count) return `<button class="primary" data-action="fill">${icon('check')}Confirm & fill (${count})</button>`;
+    if (count) return `<button class="primary" data-action="fill" ${review.url.startsWith('http:') && !allowInsecure ? 'disabled' : ''}>${icon('check')}Confirm & fill (${count})</button>`;
   }
   return `<button class="primary" data-action="scan" ${filledCount() ? '' : 'disabled'}>${icon('scan')}${review || result ? 'Scan again' : 'Scan this page'}${icon('arrow')}</button>`;
 }
@@ -131,36 +164,66 @@ function renderReview() {
   if (busy) return '<div class="loading"><div class="spinner"></div><p>Checking the page…</p></div>';
   if (result) {
     const count = result.results.filter(r => r.ok).length;
-    return `<div class="scan-hero"><div class="scan-art">${icon('check')}</div><div class="eyebrow">YOU’RE IN CONTROL</div><h1>${count} ${count === 1 ? 'field' : 'fields'} filled.</h1><p>Review your form on the website.<br>Ghost Typer never submits it for you.</p><ul class="result-list">${result.results.map(r => `<li><span class="${r.ok ? 'ok' : 'failed'}">${icon(r.ok ? 'check' : 'close')}</span><span>${escape(result.matches.find(m => m.id === r.id)?.label || 'Field')}${r.ok ? '' : `<br>${escape(r.reason)}`}</span></li>`).join('')}</ul></div>`;
+    return `<div class="scan-hero"><div class="scan-art">${icon('check')}</div><div class="eyebrow">YOU’RE IN CONTROL</div><h1>${count} ${count === 1 ? 'field' : 'fields'} filled.</h1><p>Check your form on the website. Ghost Typer does not submit it.</p><p class="verification">${escape(result.verification || 'The website may still validate or change these values.')}</p><ul class="result-list">${result.results.map(r => `<li><span class="${r.ok ? 'ok' : 'failed'}">${icon(r.ok ? 'check' : 'close')}</span><span>${escape(result.matches.find(m => m.id === r.id)?.label || 'Field')}${r.ok ? '' : `<br>${escape(r.reason)}`}</span></li>`).join('')}</ul></div>`;
   }
-  if (!review) return `<div class="scan-hero"><div class="scan-art">${icon('scan')}</div><div class="eyebrow">A SECOND PAIR OF HANDS</div><h1>You approve. Ghost types.</h1><p>Find the fields your saved details belong in. Nothing changes until you say so.</p><div class="step-list"><div class="step-item"><span class="step-number">01</span>Scan the form on your current page</div><div class="step-item"><span class="step-number">02</span>Review the matches and exact values</div><div class="step-item"><span class="step-number">03</span>Confirm the fields you want to fill</div></div>${!filledCount() ? '<p>Start by saving a value in My fields.</p>' : ''}</div>`;
-  const excluded = Object.values(review.counts).reduce((a, b) => a + b, 0) + review.skipped;
+  if (!review) return `<div class="scan-hero"><div class="scan-art">${icon('scan')}</div><div class="eyebrow">A SECOND PAIR OF HANDS</div><h1>You approve. Ghost types.</h1><p>Find the fields your saved details belong in. Nothing changes until you say so.</p><div class="step-list"><div class="step-item"><span class="step-number">01</span>Scan the form on your current page</div><div class="step-item"><span class="step-number">02</span>Review the matches and exact values</div><div class="step-item"><span class="step-number">03</span>Confirm the fields you want to fill</div></div>${!filledCount() ? '<p>Start by saving a value in My fields. Use ordinary form details, never passwords or financial secrets.</p>' : ''}</div>`;
+  const excluded = review.skipped.length;
   const orderedMatches = [...review.matches].sort((a, b) => Number(a.same) - Number(b.same));
-  return `<div class="review-intro"><div class="site-label">${icon('globe')}${escape(new URL(review.url).host)}</div><h1>Here’s what we found.</h1><p>Check the details. Choose what goes in.</p></div>
+  return `<div class="review-intro"><div class="site-label">${icon('globe')}${escape(new URL(review.url).origin)}</div>${review.url.startsWith('http:') ? `<label class="http-warning"><input id="allow-http" type="checkbox" ${allowInsecure ? 'checked' : ''}>This page uses unencrypted HTTP. I understand and want to fill it.</label>` : ''}<h1>Here’s what we found.</h1><p>Check the details. Choose what goes in.</p></div>
     <div class="review-summary"><span>${review.matches.length} matching ${review.matches.length === 1 ? 'field' : 'fields'}</span><button data-action="selectEmpty">Select empty fields</button><button data-action="scan">Rescan</button></div>
-    ${orderedMatches.length ? orderedMatches.map(m => `<label class="review-row ${m.selected ? 'selected' : ''}"><input type="checkbox" data-match="${escape(m.id)}" ${m.selected ? 'checked' : ''} ${m.same ? 'disabled' : ''} aria-label="${escape(m.existing && !m.same ? `Replace ${m.label}` : `Fill ${m.label}`)}"><span class="review-detail"><span class="review-name">${escape(m.label)}</span><div class="review-source">${escape(groupFor(m.groupId).name)} / ${escape(m.savedLabel)}</div><div class="review-value">${escape(m.display)}</div>${m.existing ? `<div class="review-existing">${m.same ? 'Already has this value — no change needed.' : `Currently: ${escape(m.currentDisplay)}. Check to replace.`}</div>` : ''}</span></label>`).join('') : '<div class="empty-state">' + icon('search') + '<strong>No confident matches yet</strong><p>Add a matching alias to your saved field, or save a value for the website’s field name, then scan again.</p></div>'}
-    <p class="review-note">${excluded ? `${excluded} controls skipped (empty saved answers, no clear match, unsupported, or protected). ` : ''}${review.counts.ambiguous ? `${review.counts.ambiguous} ambiguous matches were left out. ` : ''}${review.inaccessibleFrames ? 'Some embedded forms could not be accessed. ' : ''}${review.truncated ? 'Only the first 2,000 controls were scanned. ' : ''}Filled values are visible to this website’s scripts.</p>`;
+    ${orderedMatches.length ? orderedMatches.map(m => `<label class="review-row ${m.selected ? 'selected' : ''}"><input type="checkbox" data-match="${escape(m.id)}" ${m.selected ? 'checked' : ''} ${m.same ? 'disabled' : ''} aria-label="${escape(m.existing && !m.same ? `Replace ${m.label}` : `Fill ${m.label}`)}"><span class="review-detail"><span class="review-name">${escape(m.label)}</span><div class="review-context">${escape(m.context)}</div>${m.caution ? `<div class="review-caution">${escape(m.caution)}</div>` : ''}<div class="review-source">${escape(groupFor(m.groupId).name)} / ${escape(m.savedLabel)}</div><div class="review-value">${escape(m.display)}</div>${m.existing ? `<div class="review-existing">${m.same ? 'Already has this value — no change needed.' : `Currently: ${escape(m.currentDisplay)}. Check to replace.`}</div>` : ''}</span></label>`).join('') : '<div class="empty-state">' + icon('search') + '<strong>No confident matches yet</strong><p>Add a matching alias to your saved field, or save a value for the website’s field name, then scan again.</p></div>'}
+    ${skippedFields()}<p class="review-note">${excluded ? `${excluded} controls skipped (empty saved answers, no clear match, unsupported, or protected). ` : ''}${review.counts.ambiguous ? `${review.counts.ambiguous} ambiguous matches were left out. ` : ''}${review.inaccessibleFrames ? 'Some embedded forms could not be accessed. ' : ''}${review.truncated ? 'The scan reached its page-size or time limit; some controls were not scanned. ' : ''}Filled values are visible to this website’s scripts.</p>`;
 }
 
-function showDialog(title, subtitle, body, submitText = 'Save', onSubmit, danger = false) {
+function skippedFields() {
+  if (!review?.skipped.length) return '';
+  return `<details class="skipped-fields"><summary>${review.skipped.length} skipped controls — see reasons</summary>${review.skipped.slice(0, skipLimit).map(item => `<div class="skipped-row"><strong>${escape(item.label)}</strong><p>${escape(item.context)}</p><p>${escape(item.reason)}</p>${item.canMap ? `<button class="text-button" data-action="mapField" data-id="${escape(item.id)}">Choose a saved field</button>` : ''}</div>`).join('')}${review.skipped.length > skipLimit ? '<button class="text-button" data-action="moreSkipped">Show more</button>' : ''}</details>`;
+}
+function mapField(id) {
+  const item = review?.skipped.find(s => s.id === id && s.canMap);
+  if (!item) return;
+  const fields = data.fields.filter(f => f.value !== '' && !sensitiveField(f));
+  showDialog(`Match “${item.label}”`, 'Choose the saved answer to propose. You will still review and confirm before filling.',
+    `<label class="form-field">Saved field<select name="fieldId" required><option value="">Choose a saved field</option>${fields.map(f => `<option value="${escape(f.id)}">${escape(groupFor(f.groupId).name)} / ${escape(f.label)}</option>`).join('')}</select></label>`,
+    'Review this match', async form => { review = await send('mapField', { token: review.token, id, fieldId: form.get('fieldId') }); render(); });
+}
+function saveSelection() {
+  if (review) send('selectReview', { token: review.token, ids: review.matches.filter(m => m.selected).map(m => m.id) }).catch(e => toast(e.message));
+}
+function privacyInfo() {
+  showDialog('Your data & privacy', 'Ghost Typer stores ordinary form details locally in this Chrome profile.',
+    '<p class="confirm-copy">This is not an encrypted password vault. Do not save passwords, card details, or government identity numbers. Websites can read inserted values and react to input events, even before you submit. Ghost Typer does not itself submit forms.</p><p class="confirm-copy">Backups contain readable personal data. Reviews and fill receipts expire after ten minutes and are cleared by scheduled cleanup when Chrome is running. Unsaved drafts stay in this browser session until saved, discarded, or the browser session ends.</p>',
+    'Got it', async () => {});
+}
+function recoveryScreen(message) {
+  app.innerHTML = `${header()}<main class="recovery"><h1>Keep your data safe.</h1><p class="error-banner" role="alert">${escape(message)}</p><p>Export your current saved data before restoring or resetting.</p><div class="recovery-actions"><button class="secondary" data-action="exportRecovery">Export saved data</button><button class="secondary" data-action="import">Restore a backup</button><button class="danger-button" data-action="resetLibrary">Reset library</button></div></main>`;
+}
+
+function showDialog(title, subtitle, body, submitText = 'Save', onSubmit, danger = false, draft = null) {
   dialogScroll = captureScroll();
-  dialog.innerHTML = `<form><div class="dialog-head"><h2>${escape(title)}</h2>${iconButton('close', 'closeDialog', 'Close dialog')}</div><p class="dialog-subtitle">${escape(subtitle)}</p>${body}<div class="dialog-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-action="closeDialog">Cancel</button><button type="submit" class="${danger ? 'danger-button' : 'primary'}">${escape(submitText)}</button></div></form>`;
+  dialogFocus = focusSnapshot();
+  dialog.setAttribute('aria-labelledby', 'dialog-title');
+  dialog.innerHTML = `<form><div class="dialog-head"><h2 id="dialog-title">${escape(title)}</h2>${iconButton('close', 'closeDialog', 'Close dialog')}</div><p class="dialog-subtitle">${escape(subtitle)}</p>${body}<div class="dialog-error" role="alert"></div><div class="dialog-actions"><button type="button" class="secondary" data-action="closeDialog">Cancel</button><button type="submit" class="${danger ? 'danger-button' : 'primary'}">${escape(submitText)}</button></div></form>`;
   // Non-submit buttons must never implicitly submit a dialog form.
   dialog.querySelectorAll('button[data-action]').forEach(b => b.type = 'button');
   $('form', dialog).onsubmit = async event => {
     event.preventDefault(); const button = $('button[type="submit"]', dialog); button.disabled = true;
-    try { await onSubmit(new FormData(event.currentTarget)); dialog.close(); }
+    try { await onSubmit(new FormData(event.currentTarget)); if (activeDraft) await clearDraft(); dialog.close(); render(); }
     catch (e) { $('.dialog-error', dialog).textContent = e.message; }
     finally { button.disabled = false; }
   };
   dialog.showModal();
+  activeDraft = draft;
+  if (draft) persistDraft();
   const focus = $('input:not([type="radio"]),textarea,select', dialog); if (focus) focus.focus({ preventScroll: true });
 }
 async function mutate(action, message) {
   data = await send('mutate', { action }); review = null; result = null; render(); toast(message);
 }
-function editField(id, selectedGroup) {
-  const field = data.fields.find(f => f.id === id) || { id: crypto.randomUUID(), label: '', value: '', aliases: [], autocomplete: '', kind: 'text', groupId: selectedGroup ?? (group === 'all' ? data.groups[0]?.id || '' : group) };
+function editField(id, selectedGroup, draft = null) {
+  const original = draft ? draft.expected : data.fields.find(f => f.id === id) || null;
+  const base = draft?.base || original || { id: crypto.randomUUID(), label: '', value: '', aliases: [], autocomplete: '', kind: 'text', groupId: selectedGroup ?? (group === 'all' ? data.groups[0]?.id || '' : group) };
+  const field = draft ? { ...base, ...draft.values, aliases: draft.values.aliases.split(',').map(v => v.trim()).filter(Boolean) } : base;
   showDialog(id ? 'Edit field' : 'A new detail to remember', 'Give it a name, a value, and a place in your library.',
     `<label class="form-field">Field name<input name="label" required maxlength="120" value="${escape(field.label)}" placeholder="e.g. University"></label>
     <div class="form-row"><label class="form-field">Group<select name="groupId">${data.groups.map(g => `<option value="${escape(g.id)}" ${g.id === field.groupId ? 'selected' : ''}>${escape(g.name)}</option>`).join('')}<option value="" ${!field.groupId ? 'selected' : ''}>Ungrouped</option></select></label>
@@ -169,34 +232,37 @@ function editField(id, selectedGroup) {
     <label class="form-field">Also known as <span class="muted">(optional)</span><input name="aliases" maxlength="3500" value="${escape(field.aliases.join(', '))}" placeholder="College, Institution, University name"><span class="hint">Separate alternative field labels with commas. Exact aliases make matching more reliable.</span></label>`,
     id ? 'Save changes' : 'Add field', async form => {
       const label = form.get('label').trim();
-      await mutate({ type: 'saveField', field: { ...field, label, value: form.get('value'), kind: form.get('kind'), groupId: form.get('groupId'), aliases: form.get('aliases').split(',').map(v => v.trim()).filter(Boolean), autocomplete: label === field.label ? field.autocomplete : '' } }, id ? 'Field updated' : 'Field added');
-    });
+      await mutate({ type: 'saveField', expected: original, field: { ...field, label, value: form.get('value'), kind: form.get('kind'), groupId: form.get('groupId'), aliases: form.get('aliases').split(',').map(v => v.trim()).filter(Boolean), autocomplete: label === base.label ? base.autocomplete : '' } }, id ? 'Field updated' : 'Field added');
+    }, false, { kind: 'field', id, base, expected: original });
   $('select[name="kind"]', dialog).onchange = event => { $('#valueContainer', dialog).innerHTML = `Value${valueInput(event.target.value, '')}`; };
   if (id) $('[name="value"]', dialog).focus({ preventScroll: true });
 }
 function valueInput(kind, value) {
   return kind === 'boolean' ? `<select name="value"><option value="">Not set</option><option value="true" ${value === 'true' ? 'selected' : ''}>Checked</option><option value="false" ${value === 'false' ? 'selected' : ''}>Unchecked</option></select>`
-    : `<textarea name="value" maxlength="10000" placeholder="The answer you want to reuse…">${escape(value)}</textarea><span class="hint">Leave blank to skip this field. For dropdowns or radio buttons, enter the option’s label.</span>`;
+    : `<textarea name="value" maxlength="10000" placeholder="The answer you want to reuse…">${escape(value)}</textarea><span class="hint">Leave blank to skip this field. For dropdowns or radio buttons, enter the option label. For a multi-select, use one label per line. Do not save passwords or financial secrets.</span>`;
 }
-function editGroup(id) {
-  const existing = data.groups.find(g => g.id === id), g = existing || { id: crypto.randomUUID(), name: '', color: COLORS[data.groups.length % COLORS.length] };
+function editGroup(id, draft = null) {
+  const existing = draft ? draft.expected : data.groups.find(g => g.id === id) || null;
+  const base = draft?.base || existing || { id: crypto.randomUUID(), name: '', color: COLORS[data.groups.length % COLORS.length] };
+  const g = draft ? { ...base, ...draft.values } : base;
   showDialog(existing ? 'Edit group' : 'Make a little room', 'Organize your fields in a way that makes sense to you.',
     `<label class="form-field">Group name<input name="name" required maxlength="60" value="${escape(g.name)}" placeholder="e.g. Education"></label><div class="form-field">Color<div class="color-options">${COLORS.map(c => `<label class="color-choice ${c}"><input type="radio" name="color" value="${c}" ${g.color === c ? 'checked' : ''} aria-label="${c}"><span></span></label>`).join('')}</div></div>`,
     existing ? 'Save changes' : 'Create group', async form => {
-      await mutate({ type: 'saveGroup', group: { id: g.id, name: form.get('name').trim(), color: form.get('color') } }, existing ? 'Group updated' : 'Group created');
-    });
+      await mutate({ type: 'saveGroup', expected: existing, group: { id: g.id, name: form.get('name').trim(), color: form.get('color') } }, existing ? 'Group updated' : 'Group created');
+    }, false, { kind: 'group', id, base, expected: existing });
 }
 function deleteField(id) {
   const f = data.fields.find(f => f.id === id); if (!f) return;
-  showDialog('Delete this field?', 'This removes the field and its saved value.', `<p class="confirm-copy">${escape(f.label)} will be removed from your library. This cannot be undone.</p>`, 'Delete field', () => mutate({ type: 'deleteField', id }, 'Field deleted'), true);
+  showDialog('Delete this field?', 'This removes the field and its saved value.', `<p class="confirm-copy">${escape(f.label)} will be removed from your library. This cannot be undone.</p>`, 'Delete field', () => mutate({ type: 'deleteField', id, expected: f }, 'Field deleted'), true);
 }
 function deleteGroup(id) {
   const g = data.groups.find(g => g.id === id); if (!g) return;
-  showDialog('Delete this group?', 'Your fields and saved values will be kept.', `<p class="confirm-copy">Delete “${escape(g.name)}”? Its ${data.fields.filter(f => f.groupId === id).length} fields will move to Ungrouped.</p>`, 'Delete group', () => mutate({ type: 'deleteGroup', id }, 'Group deleted; fields moved to Ungrouped'), true);
+  showDialog('Delete this group?', 'Your fields and saved values will be kept.', `<p class="confirm-copy">Delete “${escape(g.name)}”? Its ${data.fields.filter(f => f.groupId === id).length} fields will move to Ungrouped.</p>`, 'Delete group', () => mutate({ type: 'deleteGroup', id, expected: g }, 'Group deleted; fields moved to Ungrouped'), true);
 }
 async function scan() {
   if (busy) return;
   busy = true; tab = 'review'; review = null; result = null; error = ''; render();
+  allowInsecure = false; skipLimit = 30;
   try { review = await send('scan'); }
   catch (e) { error = e.message; }
   finally { busy = false; render(); }
@@ -206,28 +272,28 @@ async function fill() {
   const items = review.matches.filter(m => m.selected && !m.same).map(m => ({ id: m.id, overwrite: m.existing }));
   if (!items.length) return;
   busy = true; error = ''; render();
-  try { result = await send('fill', { token: review.token, items }); review = null; }
+  try { result = await send('fill', { token: review.token, items, allowInsecure }); review = null; }
   catch (e) { error = e.message; review = null; }
   finally { busy = false; render(); }
 }
-function exportBackup() {
-  const { revision, ...backup } = data;
-  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+function downloadJSON(contents, filename) {
+  const blob = new Blob([contents], { type: 'application/json' });
   const url = URL.createObjectURL(blob), a = document.createElement('a');
-  a.href = url; a.download = `ghost-typer-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click();
+  a.href = url; a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 10000); toast('Backup exported. It contains readable personal data.');
 }
+function exportBackup() { downloadJSON(serializeBackup(data), `ghost-typer-backup-${new Date().toISOString().slice(0, 10)}.json`); }
 function importBackup() {
   const input = document.createElement('input'); input.type = 'file'; input.accept = '.json,application/json';
   input.onchange = async () => {
     try {
       const file = input.files[0]; if (!file) return;
-      if (file.size > 5 * 1024 * 1024) throw new Error('Backup must be smaller than 5 MB.');
+      if (file.size > MAX_BACKUP_BYTES) throw new Error('Backup must be smaller than 16 MB. Every backup exported by this version fits this limit.');
       let parsed; try { parsed = JSON.parse(await file.text()); } catch { throw new Error('The file is not valid JSON.'); }
-      const imported = validateLibrary(parsed);
+      const imported = migrateLibrary(parsed), expectedRevision = data?.revision;
       showDialog('Replace your library?', 'Review this backup before importing. Existing fields and groups will be replaced.',
-        `<p class="confirm-copy">Import ${imported.fields.length} fields in ${imported.groups.length} groups.<br>Your current ${data.fields.length} fields in ${data.groups.length} groups will be replaced. Export a backup first if you want to keep them.</p>`, 'Replace & import', async () => {
-          data = await send('import', { library: imported }); review = null; result = null; group = 'all'; render(); toast('Backup imported');
+        `<p class="confirm-copy">Import ${imported.fields.length} fields in ${imported.groups.length} groups.<br>Your current library will be replaced. Export a backup first if you want to keep it.</p>`, 'Replace & import', async () => {
+          data = await send('import', { library: imported, expectedRevision }); review = null; result = null; group = 'all'; render(); toast('Backup imported');
         });
     } catch (e) { toast(e.message); }
   };
@@ -237,7 +303,11 @@ document.addEventListener('click', async event => {
   const button = event.target.closest('button[data-action]'); if (!button || button.disabled) return;
   const action = button.dataset.action;
   try {
-    if (action === 'closeDialog') dialog.close();
+    if (pendingDraft && !dialog.open && ['addField', 'editField', 'addGroup', 'editGroup'].includes(action)) {
+      toast('Resume or discard your unsaved edit before starting another one.');
+      return;
+    }
+    if (action === 'closeDialog') { if (activeDraft) await clearDraft(); dialog.close(); render(); }
     else if (action === 'addField') editField(null, button.dataset.group);
     else if (action === 'editField') editField(button.dataset.id);
     else if (action === 'deleteField') deleteField(button.dataset.id);
@@ -249,12 +319,23 @@ document.addEventListener('click', async event => {
     else if (action === 'manager') await chrome.runtime.openOptionsPage();
     else if (action === 'scan') await scan();
     else if (action === 'fill') await fill();
-    else if (action === 'selectEmpty' && review) { review.matches.forEach(m => { m.selected = !m.existing && !m.same; }); render(); }
+    else if (action === 'selectEmpty' && review) { review.matches.forEach(m => { m.selected = !m.existing && !m.same && !m.caution; }); saveSelection(); render(); }
     else if (action === 'export') exportBackup();
     else if (action === 'import') importBackup();
+    else if (action === 'privacy') privacyInfo();
+    else if (action === 'mapField') mapField(button.dataset.id);
+    else if (action === 'moreSkipped') { skipLimit += 30; render(); $('.skipped-fields').open = true; }
+    else if (action === 'resumeDraft' && pendingDraft) {
+      const draft = pendingDraft;
+      if (draft.kind === 'field') editField(draft.id, undefined, draft); else editGroup(draft.id, draft);
+    }
+    else if (action === 'discardDraft') { await clearDraft(); render(); }
+    else if (action === 'exportRecovery') downloadJSON(JSON.stringify(await send('getRecovery'), null, 2), 'ghost-typer-recovery.json');
+    else if (action === 'resetLibrary') showDialog('Reset your library?', 'Export your saved data first. Resetting cannot be undone.', '<p class="confirm-copy">This deletes the current library and restores empty starter fields.</p>', 'Reset library', async () => { data = await send('resetLibrary'); render(); }, true);
   } catch (e) { toast(e.message); }
 });
 document.addEventListener('input', event => {
+  if (dialog.contains(event.target)) persistDraft();
   if (event.target.id === 'search') {
     const position = captureScroll();
     search = event.target.value; $('#sections').innerHTML = sections();
@@ -262,24 +343,40 @@ document.addEventListener('input', event => {
   }
 });
 document.addEventListener('change', event => {
+  if (dialog.contains(event.target)) persistDraft();
+  if (event.target.id === 'allow-http') {
+    allowInsecure = event.target.checked;
+    $('.popup-footer').innerHTML = footerButton() + '<p class="footnote">Only selected values are filled. Website scripts can react to changes.</p>';
+  }
   const id = event.target.dataset.match;
   if (id && review) {
     const match = review.matches.find(m => m.id === id); if (!match) return;
     match.selected = event.target.checked;
+    saveSelection();
     event.target.closest('.review-row').classList.toggle('selected', match.selected);
-    $('.popup-footer').innerHTML = footerButton() + '<p class="footnote">Only your selected values will be filled. Nothing is submitted.</p>';
+    $('.popup-footer').innerHTML = footerButton() + '<p class="footnote">Only selected values are filled. Website scripts can react to changes.</p>';
   }
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.library && data) {
-    data = validateLibrary(changes.library.newValue); review = null; result = null;
+    try { data = migrateLibrary(changes.library.newValue); } catch (e) { if (!dialog.open) recoveryScreen(e.message); return; }
+    review = null; result = null;
     if (!dialog.open) render();
   }
 });
+dialog.addEventListener('cancel', () => { clearDraft().then(render).catch(() => {}); });
+document.addEventListener('keydown', event => {
+  if (event.target.getAttribute('role') !== 'tab' || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  tab = event.key === 'Home' ? 'review' : event.key === 'End' ? 'fields' : tab === 'review' ? 'fields' : 'review';
+  render(); $(`#tab-${tab}`).focus({ preventScroll: true });
+});
 try {
   data = await send('getLibrary');
-  if (popup) { review = await send('getReview'); if (review) tab = 'review'; }
+  pendingDraft = (await chrome.storage.session.get(draftKey))[draftKey] || null;
+  if (popup) { review = await send('getReview'); if (!review) result = await send('getReceipt'); }
   render();
 } catch (e) {
-  app.innerHTML = `<main style="padding:24px"><h1>Ghost Typer</h1><div class="error-banner">${escape(e.message)}</div></main>`;
+  if (e.code === 'RECOVERY_REQUIRED') recoveryScreen(e.message);
+  else app.innerHTML = `<main style="padding:24px"><h1>Ghost Typer</h1><div class="error-banner">${escape(e.message)}</div></main>`;
 }

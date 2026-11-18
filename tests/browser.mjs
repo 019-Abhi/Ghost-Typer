@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { SAFETY_POLICY } from '../extension/safety.js';
 import { pageAgent } from '../extension/page-agent.js';
 import { createReview } from '../extension/matcher.js';
 
@@ -12,7 +13,7 @@ const artifacts = path.join(root, 'test-results'); await mkdir(artifacts, { recu
 const temp = await mkdtemp(path.join(os.tmpdir(), 'ghost-typer-test-'));
 const addon = path.join(temp, 'extension'); await cp(path.join(root, 'dist/ghost-typer'), addon, { recursive: true });
 const manifest = JSON.parse(await readFile(path.join(addon, 'manifest.json'), 'utf8'));
-assert.deepEqual(manifest.permissions, ['storage', 'activeTab', 'scripting']);
+assert.deepEqual(manifest.permissions, ['storage', 'activeTab', 'scripting', 'alarms']);
 assert.equal(manifest.host_permissions, undefined);
 // Headless browsers cannot click Chrome's toolbar to grant activeTab. ONLY this temporary
 // test copy gets loopback access; the packaged extension retains activeTab-only permissions.
@@ -67,7 +68,7 @@ try {
   for (const [label, value] of Object.entries(values)) {
     const field = { ...library.fields.find(f => f.label === label), value };
     assert(field.id);
-    const response = await manager.evaluate(async field => chrome.runtime.sendMessage({ type: 'mutate', action: { type: 'saveField', field } }), field);
+    const response = await manager.evaluate(async field => chrome.runtime.sendMessage({ type: 'mutate', action: { type: 'saveField', field, expected: (await chrome.runtime.sendMessage({type:'getLibrary'})).data.fields.find(f=>f.id===field.id) } }), field);
     assert(response.ok, response.error);
   }
   for (const f of [
@@ -78,8 +79,8 @@ try {
     { label: 'One-time code', value: '123456' },
     { label: 'I agree to the terms', value: 'true', kind: 'boolean' }
   ]) {
-    const response = await manager.evaluate(async f => chrome.runtime.sendMessage({ type: 'mutate', action: { type: 'saveField', field: { id: crypto.randomUUID(), groupId: '', aliases: [], autocomplete: '', kind: 'text', ...f } } }), f);
-    assert(response.ok, response.error);
+    const response = await manager.evaluate(async f => chrome.runtime.sendMessage({ type: 'mutate', action: { type: 'saveField', expected: null, field: { id: crypto.randomUUID(), groupId: '', aliases: [], autocomplete: '', kind: 'text', ...f } } }), f);
+    assert.equal(response.ok, ['Newsletter', 'Work preference'].includes(f.label), response.error);
   }
   await manager.reload();
   await manager.getByText('asha@example.com', { exact: true }).waitFor();
@@ -104,6 +105,7 @@ try {
   pass('Scanning never changes inputs; review contains exact proposals and skips protected fields');
   await popup.screenshot({ path: path.join(artifacts, 'review.png') });
   await popup.getByRole('checkbox', { name: 'Fill Email address', exact: true }).uncheck();
+  await popup.locator('#allow-http').check();
   await popup.getByRole('button', { name: /Confirm & fill/ }).click();
   await popup.getByRole('heading', { name: /fields filled/ }).waitFor();
   assert.equal(await page.locator('[name=fullName]').first().inputValue(), 'Asha Rao');
@@ -121,6 +123,7 @@ try {
   // Deliberately replace the existing company only after selecting its replacement checkbox.
   await popup.getByRole('button', { name: 'Scan again', exact: true }).click();
   await popup.getByRole('checkbox', { name: 'Replace Company', exact: true }).check();
+  await popup.locator('#allow-http').check();
   await popup.getByRole('button', { name: /Confirm & fill/ }).click();
   await popup.getByRole('heading', { name: /fields filled/ }).waitFor();
   assert.equal(await page.locator('[name=company]').inputValue(), 'Acme Studio');
@@ -138,6 +141,7 @@ try {
   await firstRow.getByRole('checkbox').uncheck();
   assert.equal(await popup.getByRole('button', { name: 'Scan again', exact: true }).isEnabled(), true);
   await firstRow.getByRole('checkbox').check();
+  await popup.locator('#allow-http').check();
   await popup.getByRole('button', { name: /Confirm & fill/ }).click();
   await popup.getByRole('heading', { name: '1 field filled.' }).waitFor();
   assert.equal(await page.locator('[name=city]').inputValue(), 'Bengaluru');
@@ -147,6 +151,7 @@ try {
   await popup.getByRole('button', { name: 'Scan again', exact: true }).click();
   await popup.getByRole('heading', { name: 'Here’s what we found.' }).waitFor();
   await page.locator('[name=email]').first().fill('changed@example.com');
+  await popup.locator('#allow-http').check();
   await popup.getByRole('button', { name: /Confirm & fill/ }).click();
   await popup.getByRole('heading', { name: '0 fields filled.' }).waitFor();
   assert.equal(await page.locator('[name=email]').first().inputValue(), 'changed@example.com');
@@ -156,7 +161,7 @@ try {
   await popup.getByRole('checkbox', { name: 'Fill Graduation year', exact: true }).waitFor();
   const stale = await popup.evaluate(async () => (await chrome.runtime.sendMessage({ type: 'getReview' })).data);
   await page.reload();
-  const denied = await popup.evaluate(async review => chrome.runtime.sendMessage({ type: 'fill', token: review.token, items: review.matches.filter(m => m.selected).map(m => ({ id: m.id })) }), stale);
+  const denied = await popup.evaluate(async review => chrome.runtime.sendMessage({ type: 'fill', token: review.token, allowInsecure: true, items: review.matches.filter(m => m.selected).map(m => ({ id: m.id })) }), stale);
   assert.equal(denied.ok, false);
   assert.equal(await page.locator('[name=fullName]').first().inputValue(), '');
   pass('Dynamic fields are found on rescan; navigation invalidates a previous review');
@@ -170,7 +175,7 @@ try {
     document.querySelector('#name').addEventListener('change', () => document.querySelector('#events').textContent += 'change');
   });
   // evaluate only accepts one argument, so invoke the serialized self-contained page function.
-  const runAgent = (operation, payload) => fixture.evaluate(({ source, operation, payload }) => (0, eval)(`(${source})`)(operation, payload), { source: pageAgent.toString(), operation, payload });
+  const runAgent = (operation, payload) => fixture.evaluate(({ source, operation, payload }) => (0, eval)(`(${source})`)(operation, payload), { source: pageAgent.toString(), operation, payload: { ...payload, policy: SAFETY_POLICY } });
   const snapshot = await runAgent('scan', { token: 'fixture' });
   assert.equal(snapshot.descriptors.length, 3);
   const matches = createReview(snapshot.descriptors, (await getLibrary()).fields).matches;

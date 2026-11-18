@@ -33,3 +33,27 @@ test('select option values and labels must map unambiguously', () => {
   d.options.push({ label: 'India', value: 'other', disabled: false });
   assert.equal(proposedValue(d, field('Country', 'India')), null);
 });
+
+test('repeated names in different sections require individual confirmation', () => {
+  const descriptors = [descriptor(['Name'], { id: 'self', context: 'Your details', contextKey: 'one' }), descriptor(['Name'], { id: 'other', context: 'Emergency contact', contextKey: 'two' })];
+  const { matches } = createReview(descriptors, [field('Full name', 'Asha', ['Name'])]);
+  assert.equal(matches.length, 2); assert(matches.every(m => !m.selected && m.caution));
+});
+test('explicit contextual aliases beat generic labels and protect alternate addresses', () => {
+  const fields = [field('Full name', 'Asha', ['Name']), field('Emergency contact name', 'Raj')];
+  const d = descriptor(['Name'], { context: 'Emergency contact', contextSignals: ['Emergency contact Name'], contextKey: 'emergency' });
+  assert.equal(matchField(d, fields).field.value, 'Raj');
+  assert.equal(createReview([descriptor(['Address'], {context:'shipping'})], [field('Address','42 Road')]).matches[0].selected, false);
+});
+test('compact sensitive labels and multilingual names are blocked consistently', () => {
+  for (const name of ['cardnumber','socialsecuritynumber','creditcard','mot de passe','contraseña','पासवर्ड']) {
+    assert.equal(isSensitive(descriptor([name])), true, name);
+    assert.equal(createReview([descriptor([name])], [field(name,'dummy')]).matches.length, 0);
+  }
+});
+test('multi-select values map in option order and skipped controls explain ambiguity', () => {
+  const d = descriptor(['Skills'], { type:'select-multiple', current:[], options:[{label:'JavaScript',value:'js'},{label:'Python',value:'py'}] });
+  assert.deepEqual(proposedValue(d, field('Skills','Python\nJavaScript')), {value:['js','py'],display:'JavaScript\nPython'});
+  const review = createReview([descriptor(['Email'])], [field('Email','a'),field('Other email','b',['Email'])]);
+  assert.equal(review.skipped[0].canMap,true); assert.match(review.skipped[0].reason,/More than one/);
+});
