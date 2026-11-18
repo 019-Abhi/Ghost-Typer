@@ -16,7 +16,7 @@ This is an installable development extension, not a Chrome Web Store listing. No
 
 ## Use it
 
-1. Click Ghost Typer. Click a field’s value (or **Add a value to get started**) to edit it, or choose **Add field**. The editor opens with the value focused. Values save when you click **Save changes** / **Add field**.
+1. Click Ghost Typer, then **My fields**. Click a field’s value (or **Add a value to get started**) to edit it, or choose **Add field**. The editor opens with the value focused. Values save when you click **Save changes** / **Add field**.
 2. Use groups to organize your details. Starter groups: **Personal, Contact, Address, Education, Employment**. All suggested values start empty.
 3. Add aliases such as `University name, College, Institution` for the labels websites use.
 4. Visit a regular HTTP/HTTPS website. Click the Ghost Typer toolbar icon, then **Scan this page**.
@@ -24,6 +24,10 @@ This is an installable development extension, not a Chrome Web Store listing. No
 6. Click **Confirm & fill**. Check the website’s form before submitting it yourself.
 
 Opening the extension or scanning never fills the page. There is no automatic background filling or learning.
+
+The popup opens on **Review & fill**, the first tab. When nothing is selected to fill, **Scan again** refreshes the review, including values you changed on the website. Selectable matches appear before rows already containing the saved value. Selecting a match brings back **Confirm & fill**.
+
+Your scroll position is preserved across library actions and dialog cancellation, and each popup tab remembers its position while the popup stays open. If deleting content makes the page shorter, the position is limited to the remaining scrollable area.
 
 ### Organizing fields
 

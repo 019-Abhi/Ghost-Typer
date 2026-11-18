@@ -89,6 +89,8 @@ try {
   const popup = await context.newPage(); await popup.setViewportSize({ width: 460, height: 590 });
   await popup.goto(`chrome-extension://${id}/popup.html`);
   await popup.getByRole('button', { name: 'Scan this page', exact: true }).waitFor();
+  assert.equal(await popup.locator('.tabs button').first().getAttribute('data-tab'), 'review');
+  assert.equal(await popup.locator('.tabs .active').getAttribute('data-tab'), 'review');
   await popup.screenshot({ path: path.join(artifacts, 'popup.png') });
   await page.bringToFront();
   await popup.getByRole('button', { name: 'Scan this page', exact: true }).click();
@@ -123,6 +125,23 @@ try {
   await popup.getByRole('heading', { name: /fields filled/ }).waitFor();
   assert.equal(await page.locator('[name=company]').inputValue(), 'Acme Studio');
   pass('Existing values are replaced only after explicitly selecting them');
+  await popup.getByRole('button', { name: 'Scan again', exact: true }).click();
+  await popup.getByRole('heading', { name: 'Here’s what we found.' }).waitFor();
+  assert.equal(await popup.locator('.review-row input:enabled').count(), 0);
+  assert.equal(await popup.getByRole('button', { name: 'Scan again', exact: true }).isEnabled(), true);
+  await page.locator('[name=city]').fill('Mysuru');
+  await popup.getByRole('button', { name: 'Scan again', exact: true }).click();
+  const firstRow = popup.locator('.review-row').first();
+  await firstRow.getByRole('checkbox', { name: 'Replace City', exact: true }).waitFor();
+  assert.equal(await firstRow.getByRole('checkbox').isEnabled(), true);
+  await firstRow.getByRole('checkbox').check();
+  await firstRow.getByRole('checkbox').uncheck();
+  assert.equal(await popup.getByRole('button', { name: 'Scan again', exact: true }).isEnabled(), true);
+  await firstRow.getByRole('checkbox').check();
+  await popup.getByRole('button', { name: /Confirm & fill/ }).click();
+  await popup.getByRole('heading', { name: '1 field filled.' }).waitFor();
+  assert.equal(await page.locator('[name=city]').inputValue(), 'Bengaluru');
+  pass('Review opens first; completed reviews can rescan and changed fields appear first for replacement');
   // Stale input, navigation, and library revisions must invalidate or skip a review.
   await page.locator('[name=email]').first().fill('');
   await popup.getByRole('button', { name: 'Scan again', exact: true }).click();

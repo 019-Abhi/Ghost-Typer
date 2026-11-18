@@ -23,7 +23,7 @@ const paths = {
 const icon = name => `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.folder}</svg>`;
 const iconButton = (name, action, label, extra = '') => `<button class="icon-button ${name === 'trash' ? 'remove' : ''}" data-action="${action}" aria-label="${escape(label)}" title="${escape(label)}" ${extra}>${icon(name)}</button>`;
 const popup = document.body.classList.contains('popup');
-let data, group = 'all', search = '', tab = 'fields', review = null, result = null, busy = false, error = '';
+let data, group = 'all', search = '', tab = 'review', review = null, result = null, busy = false, error = '';
 const app = $('#app'), dialog = $('#dialog');
 const scrollPositions = new Map();
 let renderedView = null, renderedBusy = false, dialogScroll = null;
@@ -105,7 +105,7 @@ function render() {
   const nextView = popup ? tab : 'manager';
   if (group !== 'all' && group !== '' && !data.groups.some(g => g.id === group)) group = 'all';
   if (popup) {
-    app.innerHTML = `${header()}<nav class="tabs" aria-label="Extension views"><button class="tab ${tab === 'fields' ? 'active' : ''}" data-action="tab" data-tab="fields">${icon('grid')}My fields</button><button class="tab ${tab === 'review' ? 'active' : ''}" data-action="tab" data-tab="review">${icon('scan')}Review & fill${review ? ` · ${review.matches.length}` : ''}</button></nav>
+    app.innerHTML = `${header()}<nav class="tabs" aria-label="Extension views"><button class="tab ${tab === 'review' ? 'active' : ''}" data-action="tab" data-tab="review">${icon('scan')}Review & fill${review ? ` · ${review.matches.length}` : ''}</button><button class="tab ${tab === 'fields' ? 'active' : ''}" data-action="tab" data-tab="fields">${icon('grid')}My fields</button></nav>
       <main class="popup-content">${error ? `<div class="error-banner" role="alert">${escape(error)}</div>` : ''}${tab === 'fields' ? toolbar() + `<nav class="group-chips" aria-label="Field groups">${groupButtons(true)}<button data-action="addGroup">${icon('plus')}New group</button></nav><div id="sections">${sections()}</div>` : renderReview()}</main>
       <footer class="popup-footer">${footerButton()}<p class="footnote">${review && tab === 'review' ? 'Only your selected values will be filled. Nothing is submitted.' : 'You review every match before anything is filled.'}</p></footer>`;
   } else {
@@ -123,9 +123,9 @@ function footerButton() {
   if (busy) return '<button class="primary" disabled>Working…</button>';
   if (tab === 'review' && review) {
     const count = review.matches.filter(m => m.selected && !m.same).length;
-    return `<button class="primary" data-action="fill" ${count ? '' : 'disabled'}>${icon('check')}Confirm & fill ${count ? `(${count})` : ''}</button>`;
+    if (count) return `<button class="primary" data-action="fill">${icon('check')}Confirm & fill (${count})</button>`;
   }
-  return `<button class="primary" data-action="scan" ${filledCount() ? '' : 'disabled'}>${icon('scan')}${result ? 'Scan again' : 'Scan this page'}${icon('arrow')}</button>`;
+  return `<button class="primary" data-action="scan" ${filledCount() ? '' : 'disabled'}>${icon('scan')}${review || result ? 'Scan again' : 'Scan this page'}${icon('arrow')}</button>`;
 }
 function renderReview() {
   if (busy) return '<div class="loading"><div class="spinner"></div><p>Checking the page…</p></div>';
@@ -135,9 +135,10 @@ function renderReview() {
   }
   if (!review) return `<div class="scan-hero"><div class="scan-art">${icon('scan')}</div><div class="eyebrow">A SECOND PAIR OF HANDS</div><h1>You approve. Ghost types.</h1><p>Find the fields your saved details belong in. Nothing changes until you say so.</p><div class="step-list"><div class="step-item"><span class="step-number">01</span>Scan the form on your current page</div><div class="step-item"><span class="step-number">02</span>Review the matches and exact values</div><div class="step-item"><span class="step-number">03</span>Confirm the fields you want to fill</div></div>${!filledCount() ? '<p>Start by saving a value in My fields.</p>' : ''}</div>`;
   const excluded = Object.values(review.counts).reduce((a, b) => a + b, 0) + review.skipped;
+  const orderedMatches = [...review.matches].sort((a, b) => Number(a.same) - Number(b.same));
   return `<div class="review-intro"><div class="site-label">${icon('globe')}${escape(new URL(review.url).host)}</div><h1>Here’s what we found.</h1><p>Check the details. Choose what goes in.</p></div>
     <div class="review-summary"><span>${review.matches.length} matching ${review.matches.length === 1 ? 'field' : 'fields'}</span><button data-action="selectEmpty">Select empty fields</button><button data-action="scan">Rescan</button></div>
-    ${review.matches.length ? review.matches.map(m => `<label class="review-row ${m.selected ? 'selected' : ''}"><input type="checkbox" data-match="${escape(m.id)}" ${m.selected ? 'checked' : ''} ${m.same ? 'disabled' : ''} aria-label="${escape(m.existing && !m.same ? `Replace ${m.label}` : `Fill ${m.label}`)}"><span class="review-detail"><span class="review-name">${escape(m.label)}</span><div class="review-source">${escape(groupFor(m.groupId).name)} / ${escape(m.savedLabel)}</div><div class="review-value">${escape(m.display)}</div>${m.existing ? `<div class="review-existing">${m.same ? 'Already has this value — no change needed.' : `Currently: ${escape(m.currentDisplay)}. Check to replace.`}</div>` : ''}</span></label>`).join('') : '<div class="empty-state">' + icon('search') + '<strong>No confident matches yet</strong><p>Add a matching alias to your saved field, or save a value for the website’s field name, then scan again.</p></div>'}
+    ${orderedMatches.length ? orderedMatches.map(m => `<label class="review-row ${m.selected ? 'selected' : ''}"><input type="checkbox" data-match="${escape(m.id)}" ${m.selected ? 'checked' : ''} ${m.same ? 'disabled' : ''} aria-label="${escape(m.existing && !m.same ? `Replace ${m.label}` : `Fill ${m.label}`)}"><span class="review-detail"><span class="review-name">${escape(m.label)}</span><div class="review-source">${escape(groupFor(m.groupId).name)} / ${escape(m.savedLabel)}</div><div class="review-value">${escape(m.display)}</div>${m.existing ? `<div class="review-existing">${m.same ? 'Already has this value — no change needed.' : `Currently: ${escape(m.currentDisplay)}. Check to replace.`}</div>` : ''}</span></label>`).join('') : '<div class="empty-state">' + icon('search') + '<strong>No confident matches yet</strong><p>Add a matching alias to your saved field, or save a value for the website’s field name, then scan again.</p></div>'}
     <p class="review-note">${excluded ? `${excluded} controls skipped (empty saved answers, no clear match, unsupported, or protected). ` : ''}${review.counts.ambiguous ? `${review.counts.ambiguous} ambiguous matches were left out. ` : ''}${review.inaccessibleFrames ? 'Some embedded forms could not be accessed. ' : ''}${review.truncated ? 'Only the first 2,000 controls were scanned. ' : ''}Filled values are visible to this website’s scripts.</p>`;
 }
 
