@@ -21,7 +21,7 @@ Additional improvements:
 - Unsaved field/group drafts survive popup closure during the browser session. Resume/discard controls prevent accidental replacement by a different edit. Explicit Save/Cancel/close/Escape clears a draft.
 - Invalid or unknown stored schemas open recovery controls: export raw data, restore a backup, or explicitly reset. The app never silently discards unreadable data.
 - DOM traversal and scan/fill time budgets prevent unbounded work. Matching uses prebuilt indexes instead of repeatedly scanning the whole saved library for each input.
-- Keyboard-operable tabs, focus restoration for retained controls, improved contrast, and a narrow-window layout improve accessibility.
+- Keyboard-operable tabs, focus restoration for retained controls, improved contrast, and a stable 420 × 550 popup layout improve accessibility.
 - Scroll preservation remains intact for editing, deletion, cancellation, tab changes, and updates from another window.
 
 ## Validation
